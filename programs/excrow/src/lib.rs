@@ -1,6 +1,12 @@
+pub mod context;
+pub mod error;
+pub mod processor;
+pub mod state;
+use context::{Initialize, Exchange, Cancel};
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, CloseAccount, Mint, SetAuthority, TokenAccount, Transfer};
+use anchor_spl::token;
 use spl_token::instruction::AuthorityType;
+
 
 declare_id!("6cn9ZD4tPQjyo1iSaBqcuuCFnPhLj6naTCAtqkKKRmht");
 
@@ -8,64 +14,71 @@ declare_id!("6cn9ZD4tPQjyo1iSaBqcuuCFnPhLj6naTCAtqkKKRmht");
 pub mod excrow {
     use super::*;
 
+    const ESCROW_PDA_SEED: &[u8] = b"excrow";
+
     pub fn initialize(ctx: Context<Initialize>,        
         _vault_account_bump: u8,
         initializer_amount: u64,
-        taker_amount: u64,) -> ProgramResult{
+        taker_amount: u64,) -> ProgramResult {
+            // set initializer key in escrow contract account from passed instruction context
+            ctx.accounts.escrow_account.initializer_key = *ctx.accounts.initializer.key;
+            // set depositing account in escrow contract account from passed instruction context
+            ctx.accounts.escrow_account.initializer_deposit_token_account = *ctx.accounts.initializer_deposit_token_account.to_account_info().key;
+            // set receiving account in escrow contract account from passed instruction context
+            ctx.accounts.escrow_account.initializer_receive_token_account = *ctx.accounts.initializer_receive_token_account.to_account_info().key;
+            // set initializer amount
+            ctx.accounts.escrow_account.initializer_amount = initializer_amount;    
+            // set taker amount
+            ctx.accounts.escrow_account.taker_amount = taker_amount;
+
+            let (vault_authority, _vault_account_bump) = Pubkey::find_program_address(&[ESCROW_PDA_SEED], ctx.program_id);
+            token::set_authority(ctx.accounts.into_set_authority_context(), AuthorityType::AccountOwner, Some(vault_authority));
         Ok(())
     }
-    pub fn exchange(ctx: Context<Exchange>) -> ProgramResult{
+    pub fn cancel(ctx: Context<Cancel>) -> ProgramResult {
+        let (_vault_authority, vault_authority_bump) =
+            Pubkey::find_program_address(&[ESCROW_PDA_SEED], ctx.program_id);
+        let authority_seeds = &[&ESCROW_PDA_SEED[..], &[vault_authority_bump]];
+
+        token::transfer(
+            ctx.accounts
+                .into_transfer_to_initializer_context()
+                .with_signer(&[&authority_seeds[..]]),
+            ctx.accounts.escrow_account.initializer_amount,
+        )?;
+
+        token::close_account(
+            ctx.accounts
+                .into_close_context()
+                .with_signer(&[&authority_seeds[..]]),
+        )?;
+
         Ok(())
     }
-    pub fn cancel(ctx: Context<Cancel>) -> ProgramResult{
+
+    pub fn exchange(ctx: Context<Exchange>) -> ProgramResult {
+        let (_vault_authority, vault_authority_bump) =
+            Pubkey::find_program_address(&[ESCROW_PDA_SEED], ctx.program_id);
+        let authority_seeds = &[&ESCROW_PDA_SEED[..], &[vault_authority_bump]];
+
+        token::transfer(
+            ctx.accounts.into_transfer_to_initializer_context(),
+            ctx.accounts.escrow_account.taker_amount,
+        )?;
+
+        token::transfer(
+            ctx.accounts
+                .into_transfer_to_taker_context()
+                .with_signer(&[&authority_seeds[..]]),
+            ctx.accounts.escrow_account.initializer_amount,
+        )?;
+
+        token::close_account(
+            ctx.accounts
+                .into_close_context()
+                .with_signer(&[&authority_seeds[..]]),
+        )?;
+
         Ok(())
     }
 }
-
-
-#[account]
-pub struct EscrowAccount {
-    pub initializer_key: Pubkey,
-    pub initializer_deposit_token_account: Pubkey,
-    pub initializer_receive_token_account: Pubkey,
-    pub initializer_amount: u64,
-    pub taker_amount: u64,
-}
-
-#[derive(Accounts)]
-pub struct Initialize<'info> {
-    pub initializer: AccountInfo<'info>,
-    pub mint: Account<'info, Mint>,
-    pub vault_account: Account<'info, TokenAccount>,
-    pub initializer_deposit_token_account: Account<'info, TokenAccount>,
-    pub initializer_receive_token_account: Account<'info, TokenAccount>,
-    pub escrow_account: Box<Account<'info, EscrowAccount>>,
-    pub system_program: AccountInfo<'info>,
-    pub rent: Sysvar<'info, Rent>,
-    pub token_program: AccountInfo<'info>,
-}
-
-#[derive(Accounts)]
-pub struct Cancel<'info> {
-    pub initializer: AccountInfo<'info>,
-    pub initializer_deposit_token_account: Account<'info, TokenAccount>,
-    pub vault_account: Account<'info, TokenAccount>,
-    pub vault_authority: AccountInfo<'info>,
-    pub escrow_account: Box<Account<'info, EscrowAccount>>,
-    pub token_program: AccountInfo<'info>,
-}
-
-#[derive(Accounts)]
-pub struct Exchange<'info> {
-    pub taker: AccountInfo<'info>,
-    pub taker_deposit_token_account: Account<'info, TokenAccount>,
-    pub taker_receive_token_account: Account<'info, TokenAccount>,
-    pub initializer_deposit_token_account: Account<'info, TokenAccount>,
-    pub initializer_receive_token_account: Account<'info, TokenAccount>,
-    pub initializer: AccountInfo<'info>,
-    pub escrow_account: Box<Account<'info, EscrowAccount>>,
-    pub vault_account: Account<'info, TokenAccount>,
-    pub vault_authority: AccountInfo<'info>,
-    pub token_program: AccountInfo<'info>,
-}
-
